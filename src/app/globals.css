@@ -1,0 +1,30 @@
+/* src/app/globals.css */
+@import "tailwindcss";
+
+@theme {
+  --color-brand-blue: #3b82f6;
+  --color-dark-bg: #0f172a;
+}
+
+:root {
+  background-color: #0f172a; /* Slate 900 */
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  color: white;
+  background-color: #0f172a;
+}
+
+/* Custom scrollbar agar sesuai tema hitam */
+::-webkit-scrollbar {
+  width: 8px;
+}
+::-webkit-scrollbar-track {
+  background: #1e293b;
+}
+::-webkit-scrollbar-thumb {
+  background: #334155;
+  border-radius: 10px;
+}
