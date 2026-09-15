@@ -1,6 +1,7 @@
-import { NextResponse } from "next/server";
-import { deleteOrder, listOrders, updateOrderStatus, createOrder } from "@/lib/store";
-import { validateCreateOrder, validateOrderId, validateStatus } from "@/lib/validation";
+import { NextRequest, NextResponse } from "next/server";
+import { deleteOrder, listOrders, updateOrderStatus, createOrder, exportOrdersToCSV, updateOrderWithCompensation } from "@/lib/store";
+import { validateCreateOrder, validateOrderId, validateStatus, validateCompensation } from "@/lib/validation";
+import { verifyLogin, createSession, validateSession, destroySession } from "@/lib/auth";
 
 // Route handler berjalan di Node.js runtime — syarat untuk Netlify Blobs.
 export const runtime = "nodejs";
@@ -12,20 +13,44 @@ function badRequest(error: string) {
 }
 
 /**
- * Proteksi opsional: set env ADMIN_KEY di Netlify (Site configuration →
- * Environment variables) maka POST/PATCH/DELETE butuh header `x-admin-key`.
- * Catatan: ini penghalang sederhana, bukan sistem autentikasi penuh.
+ * Proteksi dengan session-based authentication
  */
-function isAuthorized(req: Request): boolean {
-  const expected = process.env.ADMIN_KEY;
-  if (!expected) return true;
-  return req.headers.get("x-admin-key") === expected;
+function getSession(req: Request): { username: string } | null {
+  const token = req.headers.get("x-session-token");
+  if (!token) return null;
+  return validateSession(token);
 }
 
-export async function GET() {
+function unauthorized() {
+  return NextResponse.json({ error: "Tidak diizinkan. Silakan login." }, { status: 401 });
+}
+
+export async function GET(req: NextRequest) {
   try {
-    const orders = await listOrders();
-    return NextResponse.json(orders);
+    const searchParams = req.nextUrl.searchParams;
+    
+    // Endpoint untuk export CSV
+    if (searchParams.get("export") === "csv") {
+      const session = getSession(req);
+      if (!session) return unauthorized();
+      
+      const csv = await exportOrdersToCSV();
+      return new NextResponse(csv, {
+        headers: {
+          "Content-Type": "text/csv",
+          "Content-Disposition": 'attachment; filename="laundry-orders.csv"',
+        },
+      });
+    }
+    
+    // Endpoint untuk list pesanan dengan pagination, search, filter
+    const search = searchParams.get("search") || undefined;
+    const status = searchParams.get("status") || undefined;
+    const page = parseInt(searchParams.get("page") || "1", 10);
+    const limit = parseInt(searchParams.get("limit") || "50", 10);
+    
+    const result = await listOrders({ search, status, page, limit });
+    return NextResponse.json(result);
   } catch (err) {
     console.error("[api/orders] GET gagal:", err);
     return NextResponse.json({ error: "Gagal memuat data pesanan." }, { status: 500 });
@@ -33,9 +58,9 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
-  if (!isAuthorized(req)) {
-    return NextResponse.json({ error: "Tidak diizinkan." }, { status: 401 });
-  }
+  const session = getSession(req);
+  if (!session) return unauthorized();
+  
   let body: unknown;
   try {
     body = await req.json();
@@ -56,9 +81,9 @@ export async function POST(req: Request) {
 }
 
 export async function PATCH(req: Request) {
-  if (!isAuthorized(req)) {
-    return NextResponse.json({ error: "Tidak diizinkan." }, { status: 401 });
-  }
+  const session = getSession(req);
+  if (!session) return unauthorized();
+  
   let body: unknown;
   try {
     body = await req.json();
@@ -69,25 +94,47 @@ export async function PATCH(req: Request) {
 
   const id = validateOrderId(record.id);
   if (!id.ok) return badRequest(id.error);
-  const status = validateStatus(record.status);
-  if (!status.ok) return badRequest(status.error);
-
-  try {
-    const updated = await updateOrderStatus(id.value, status.value);
-    if (!updated) {
-      return NextResponse.json({ error: `Pesanan #${id.value} tidak ditemukan.` }, { status: 404 });
+  
+  // Handle status update with optional cancellation reason and compensation
+  if (record.status !== undefined) {
+    const status = validateStatus(record.status);
+    if (!status.ok) return badRequest(status.error);
+    
+    // If cancelling, validate reason
+    if (status.value === 'Dibatalkan' && !record.cancellationReason) {
+      return badRequest("Alasan pembatalan wajib diisi.");
     }
-    return NextResponse.json(updated);
-  } catch (err) {
-    console.error("[api/orders] PATCH gagal:", err);
-    return NextResponse.json({ error: "Gagal mengubah status." }, { status: 500 });
+    
+    // Validate compensation if provided
+    if (record.compensation !== undefined) {
+      const compValidation = validateCompensation(record.compensation);
+      if (!compValidation.ok) return badRequest(compValidation.error);
+    }
+
+    try {
+      const updated = await updateOrderWithCompensation(
+        id.value, 
+        status.value, 
+        record.cancellationReason as string | undefined,
+        record.compensation as number | undefined
+      );
+      if (!updated) {
+        return NextResponse.json({ error: `Pesanan #${id.value} tidak ditemukan.` }, { status: 404 });
+      }
+      return NextResponse.json(updated);
+    } catch (err) {
+      console.error("[api/orders] PATCH gagal:", err);
+      return NextResponse.json({ error: "Gagal mengubah status." }, { status: 500 });
+    }
   }
+  
+  return badRequest("Status wajib diisi.");
 }
 
 export async function DELETE(req: Request) {
-  if (!isAuthorized(req)) {
-    return NextResponse.json({ error: "Tidak diizinkan." }, { status: 401 });
-  }
+  const session = getSession(req);
+  if (!session) return unauthorized();
+  
   const id = validateOrderId(new URL(req.url).searchParams.get("id"));
   if (!id.ok) return badRequest(id.error);
 
