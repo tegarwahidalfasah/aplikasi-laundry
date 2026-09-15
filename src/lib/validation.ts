@@ -10,11 +10,27 @@ export interface NewOrderInput {
   weight: number;
   pricePerKg: number;
   totalPrice: number;
+  notes?: string;
+  discount?: number;
 }
 
 const MAX_NAME = 80;
 const MIN_WEIGHT = 0.1;
 const MAX_WEIGHT = 100;
+const MAX_NOTES = 200;
+
+/**
+ * Sanitasi string untuk mencegah XSS
+ * Menghapus tag HTML dan karakter berbahaya
+ */
+function sanitizeString(input: string): string {
+  return input
+    .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
+    .replace(/<[^>]*>/g, '')
+    .replace(/javascript:/gi, '')
+    .replace(/on\w+\s*=/gi, '')
+    .trim();
+}
 
 /**
  * Normalisasi nomor Indonesia ke format wa.me: hanya digit, diawali "62".
@@ -40,7 +56,9 @@ export function validateCreateOrder(body: unknown): Result<NewOrderInput> {
   }
   const b = body as Record<string, unknown>;
 
-  const customerName = typeof b.customerName === "string" ? b.customerName.trim() : "";
+  // Sanitasi dan validasi nama pelanggan
+  const customerNameRaw = typeof b.customerName === "string" ? b.customerName : "";
+  const customerName = sanitizeString(customerNameRaw);
   if (customerName.length < 1 || customerName.length > MAX_NAME) {
     return { ok: false, error: `Nama pelanggan wajib diisi (maks ${MAX_NAME} karakter).` };
   }
@@ -63,10 +81,27 @@ export function validateCreateOrder(body: unknown): Result<NewOrderInput> {
     return { ok: false, error: `Berat harus antara ${MIN_WEIGHT}–${MAX_WEIGHT} kg.` };
   }
 
+  // Validasi diskon opsional
+  let discount = 0;
+  if (b.discount !== undefined && b.discount !== null) {
+    const discountNum = Number(b.discount);
+    if (!Number.isFinite(discountNum) || discountNum < 0 || discountNum > 100) {
+      return { ok: false, error: "Diskon harus antara 0-100%." };
+    }
+    discount = discountNum;
+  }
+
+  // Validasi dan sanitasi catatan opsional
+  const notesRaw = typeof b.notes === "string" ? b.notes : "";
+  const notes = notesRaw.trim().length > 0 ? sanitizeString(notesRaw).slice(0, MAX_NOTES) : undefined;
+
   // Total dihitung server — totalPrice kiriman klien sengaja diabaikan.
+  const baseTotal = weight * pricePerKg;
+  const finalTotal = Math.round(baseTotal * (1 - discount / 100));
+  
   return {
     ok: true,
-    value: { customerName, phoneNumber: phone.value, serviceType, weight, pricePerKg, totalPrice: Math.round(weight * pricePerKg) },
+    value: { customerName, phoneNumber: phone.value, serviceType, weight, pricePerKg, totalPrice: finalTotal, notes, discount },
   };
 }
 
@@ -83,4 +118,21 @@ export function validateStatus(raw: unknown): Result<OrderStatus> {
     return { ok: false, error: `Status harus salah satu dari: ${ORDER_STATUSES.join(", ")}.` };
   }
   return { ok: true, value: raw as OrderStatus };
+}
+
+/**
+ * Validasi kompensasi (harus angka positif, max 10 juta)
+ */
+export function validateCompensation(raw: unknown): Result<number> {
+  if (raw === undefined || raw === null || raw === '') {
+    return { ok: true, value: 0 };
+  }
+  const comp = Number(raw);
+  if (!Number.isFinite(comp) || comp < 0) {
+    return { ok: false, error: "Kompensasi harus berupa angka positif." };
+  }
+  if (comp > 10000000) {
+    return { ok: false, error: "Kompensasi tidak boleh melebihi Rp 10.000.000." };
+  }
+  return { ok: true, value: Math.round(comp) };
 }

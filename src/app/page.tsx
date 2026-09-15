@@ -7,9 +7,13 @@ import {
   nextStatus,
   type Order,
   type OrderStatus,
+  CANCELLATION_REASONS,
 } from "@/lib/catalog";
+import InvoiceModal from "@/components/InvoiceModal";
+import AnalyticsDashboard from "@/components/AnalyticsDashboard";
+import { Printer, BarChart3 } from "lucide-react";
 
-const ADMIN_KEY_STORAGE = "laundry-admin-key";
+const SESSION_TOKEN_STORAGE = "laundry-session-token";
 
 const rupiah = new Intl.NumberFormat("id-ID", {
   style: "currency",
@@ -18,23 +22,21 @@ const rupiah = new Intl.NumberFormat("id-ID", {
 });
 
 /**
- * Fetch pembungkus: menyertakan x-admin-key bila pernah disimpan,
- * dan sekali prompt ulang saat 401 (untuk deploy yang mengunci API).
+ * Fetch pembungkus dengan session-based authentication
  */
 async function apiFetch(input: RequestInfo, init?: RequestInit): Promise<Response> {
   const headers = new Headers(init?.headers);
-  const saved = window.localStorage.getItem(ADMIN_KEY_STORAGE);
-  if (saved) headers.set("x-admin-key", saved);
+  const token = window.localStorage.getItem(SESSION_TOKEN_STORAGE);
+  if (token) headers.set("x-session-token", token);
 
   let res = await fetch(input, { ...init, headers });
-  if (res.status === 401) {
-    const key = window.prompt("API dikunci ADMIN_KEY. Masukkan kunci akses:");
-    if (key) {
-      window.localStorage.setItem(ADMIN_KEY_STORAGE, key);
-      headers.set("x-admin-key", key);
-      res = await fetch(input, { ...init, headers });
-    }
+  
+  // Jika 401, arahkan ke login
+  if (res.status === 401 && input !== "/api/auth/login") {
+    window.localStorage.removeItem(SESSION_TOKEN_STORAGE);
+    window.location.reload();
   }
+  
   return res;
 }
 
@@ -58,6 +60,7 @@ const STATUS_STYLE: Record<OrderStatus, string> = {
   Diproses: "bg-blue-500/10 text-blue-400 border-blue-500/30",
   Selesai: "bg-violet-500/10 text-violet-400 border-violet-500/30",
   Diambil: "bg-emerald-500/10 text-emerald-400 border-emerald-500/30",
+  Dibatalkan: "bg-red-500/10 text-red-400 border-red-500/30",
 };
 
 export default function Home() {
@@ -65,39 +68,131 @@ export default function Home() {
   const [storage, setStorage] = useState<StorageInfo | null>(null);
   const [notice, setNotice] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
+  const [authenticated, setAuthenticated] = useState(false);
+  const [loginForm, setLoginForm] = useState({ username: "", password: "" });
+  const [showLogin, setShowLogin] = useState(false);
+  const [showAnalytics, setShowAnalytics] = useState(false);
+  const [invoiceOrder, setInvoiceOrder] = useState<Order | null>(null);
+  const [cancelModal, setCancelModal] = useState<{ open: boolean; orderId: number | null; reason: string; compensation: string }>({ 
+    open: false, 
+    orderId: null, 
+    reason: "", 
+    compensation: "0" 
+  });
+  
+  // Pagination & filter state
+  const [searchTerm, setSearchTerm] = useState("");
+  const [statusFilter, setStatusFilter] = useState<string>("");
+  const [currentPage, setCurrentPage] = useState(1);
+  const [totalOrders, setTotalOrders] = useState(0);
+  const ordersPerPage = 20;
+
   const [formData, setFormData] = useState<{
     customerName: string;
     phoneNumber: string;
     serviceType: string;
     weight: string;
+    notes: string;
+    discount: string;
   }>({
     customerName: "",
     phoneNumber: "",
     serviceType: SERVICE_TYPES[0].name,
     weight: "",
+    notes: "",
+    discount: "",
   });
 
   const flash = (kind: "ok" | "err", text: string) => setNotice({ kind, text });
 
+  // Check authentication on mount
+  useEffect(() => {
+    const token = window.localStorage.getItem(SESSION_TOKEN_STORAGE);
+    if (token) {
+      fetch("/api/auth/check", { headers: { "x-session-token": token } })
+        .then((r) => r.json())
+        .then((data) => {
+          setAuthenticated(data.authenticated || false);
+          if (!data.authenticated) {
+            setShowLogin(true);
+          }
+        })
+        .catch(() => {
+          setShowLogin(true);
+        });
+    } else {
+      setShowLogin(true);
+    }
+  }, []);
+
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    try {
+      const res = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(loginForm),
+      });
+      if (!res.ok) {
+        const error = await readError(res, "Login gagal");
+        flash("err", error);
+        return;
+      }
+      const data = await res.json();
+      window.localStorage.setItem(SESSION_TOKEN_STORAGE, data.token);
+      setAuthenticated(true);
+      setShowLogin(false);
+      flash("ok", `Selamat datang, ${data.user.username}!`);
+    } catch (error) {
+      flash("err", error instanceof Error ? error.message : "Login gagal.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    const token = window.localStorage.getItem(SESSION_TOKEN_STORAGE);
+    if (token) {
+      await fetch("/api/auth/logout", {
+        method: "POST",
+        headers: { "x-session-token": token },
+      });
+      window.localStorage.removeItem(SESSION_TOKEN_STORAGE);
+    }
+    setAuthenticated(false);
+    setShowLogin(true);
+    flash("ok", "Anda telah logout.");
+  };
+
   const fetchOrders = useCallback(async () => {
     try {
-      const res = await fetch("/api/orders", { cache: "no-store" });
+      const params = new URLSearchParams();
+      if (searchTerm) params.set("search", searchTerm);
+      if (statusFilter) params.set("status", statusFilter);
+      params.set("page", String(currentPage));
+      params.set("limit", String(ordersPerPage));
+      
+      const res = await apiFetch(`/api/orders?${params.toString()}`, { cache: "no-store" });
       if (!res.ok) throw new Error(await readError(res, "Gagal memuat data"));
-      const data = (await res.json()) as Order[];
-      setOrders(Array.isArray(data) ? data : []);
+      const data = await res.json();
+      setOrders(Array.isArray(data.orders) ? data.orders : []);
+      setTotalOrders(data.total || 0);
     } catch (error) {
       setOrders([]);
       flash("err", error instanceof Error ? error.message : "Gagal memuat data pesanan.");
     }
-  }, []);
+  }, [searchTerm, statusFilter, currentPage]);
 
   useEffect(() => {
-    fetchOrders();
-    fetch("/api/storage")
-      .then((r) => (r.ok ? (r.json() as Promise<StorageInfo>) : null))
-      .then(setStorage)
-      .catch(() => setStorage(null));
-  }, [fetchOrders]);
+    if (authenticated) {
+      fetchOrders();
+      fetch("/api/storage")
+        .then((r) => (r.ok ? (r.json() as Promise<StorageInfo>) : null))
+        .then(setStorage)
+        .catch(() => setStorage(null));
+    }
+  }, [fetchOrders, authenticated]);
 
   useEffect(() => {
     if (!notice) return;
@@ -106,7 +201,11 @@ export default function Home() {
   }, [notice]);
 
   const selectedPrice = SERVICE_TYPES.find((s) => s.name === formData.serviceType)?.pricePerKg ?? 0;
-  const estimatedTotal = Math.max(0, Math.round(parseFloat(formData.weight || "0") * selectedPrice));
+  const discountPercent = parseFloat(formData.discount || "0");
+  const baseTotal = Math.max(0, Math.round(parseFloat(formData.weight || "0") * selectedPrice));
+  const estimatedTotal = discountPercent > 0 
+    ? Math.round(baseTotal * (1 - discountPercent / 100))
+    : baseTotal;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -115,7 +214,12 @@ export default function Home() {
       const res = await apiFetch("/api/orders", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(formData),
+        body: JSON.stringify({
+          ...formData,
+          weight: parseFloat(formData.weight),
+          discount: discountPercent > 0 ? discountPercent : undefined,
+          notes: formData.notes || undefined,
+        }),
       });
       if (!res.ok) {
         flash("err", await readError(res, "Gagal menyimpan pesanan"));
@@ -123,7 +227,7 @@ export default function Home() {
       }
       const order = (await res.json()) as Order;
       flash("ok", `Pesanan #${order.id} tersimpan — total ${rupiah.format(order.totalPrice)}.`);
-      setFormData({ customerName: "", phoneNumber: "", serviceType: formData.serviceType, weight: "" });
+      setFormData({ customerName: "", phoneNumber: "", serviceType: formData.serviceType, weight: "", notes: "", discount: "" });
       await fetchOrders();
     } finally {
       setBusy(false);

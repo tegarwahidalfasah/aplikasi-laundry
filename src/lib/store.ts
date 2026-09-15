@@ -78,21 +78,56 @@ function keyFor(id: number): string {
 
 // ---------- operasi CRUD ----------
 
-export async function listOrders(): Promise<Order[]> {
+export async function listOrders(options?: { 
+  search?: string; 
+  status?: string; 
+  page?: number; 
+  limit?: number;
+}): Promise<{ orders: Order[]; total: number }> {
   const { s } = await store();
   const { blobs } = await s.list({ prefix: ORDER_PREFIX });
   const keys = blobs.map((b) => b.key).filter((k) => k !== COUNTER_KEY);
   const values = await s.getMany(keys);
-  const orders: Order[] = [];
+  const allOrders: Order[] = [];
+  
   for (const value of values) {
     if (!value) continue;
     try {
-      orders.push(JSON.parse(value) as Order);
+      allOrders.push(JSON.parse(value) as Order);
     } catch {
       console.error("[store] Entri rusak, dilewati");
     }
   }
-  return orders.sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id - a.id);
+  
+  // Filter berdasarkan pencarian
+  let filtered = allOrders;
+  if (options?.search) {
+    const searchLower = options.search.toLowerCase();
+    filtered = filtered.filter(order => 
+      order.customerName.toLowerCase().includes(searchLower) ||
+      order.phoneNumber?.includes(options.search || "") ||
+      order.serviceType.toLowerCase().includes(searchLower)
+    );
+  }
+  
+  // Filter berdasarkan status
+  if (options?.status) {
+    filtered = filtered.filter(order => order.status === options.status);
+  }
+  
+  // Sortir berdasarkan tanggal dan ID
+  filtered.sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id - a.id);
+  
+  const total = filtered.length;
+  
+  // Pagination
+  const page = options?.page ?? 1;
+  const limit = options?.limit ?? 50;
+  const startIndex = (page - 1) * limit;
+  const endIndex = startIndex + limit;
+  const paginatedOrders = filtered.slice(startIndex, endIndex);
+  
+  return { orders: paginatedOrders, total };
 }
 
 export async function createOrder(input: NewOrderInput): Promise<Order> {
@@ -105,6 +140,33 @@ export async function createOrder(input: NewOrderInput): Promise<Order> {
   return order;
 }
 
+export async function updateOrderWithCompensation(
+  id: number, 
+  status: OrderStatus | "Dibatalkan", 
+  cancellationReason?: string,
+  compensation?: number
+): Promise<Order | null> {
+  const { s } = await store();
+  const key = keyFor(id);
+  const raw = await s.get(key);
+  if (!raw) return null;
+  const order: Order = JSON.parse(raw);
+  order.status = status;
+  
+  if (status === 'Dibatalkan') {
+    order.cancellationReason = cancellationReason || '';
+    order.compensation = compensation || 0;
+  }
+  
+  // Recalculate final price with discount and compensation
+  const discount = order.discount || 0;
+  const afterDiscount = order.totalPrice - (order.totalPrice * discount / 100);
+  order.finalPrice = afterDiscount;
+  
+  await s.set(key, JSON.stringify(order));
+  return order;
+}
+
 export async function updateOrderStatus(id: number, status: OrderStatus): Promise<Order | null> {
   const { s } = await store();
   const key = keyFor(id);
@@ -112,6 +174,12 @@ export async function updateOrderStatus(id: number, status: OrderStatus): Promis
   if (!raw) return null;
   const order: Order = JSON.parse(raw);
   order.status = status;
+  
+  // Recalculate final price with discount
+  const discount = order.discount || 0;
+  const afterDiscount = order.totalPrice - (order.totalPrice * discount / 100);
+  order.finalPrice = afterDiscount;
+  
   await s.set(key, JSON.stringify(order));
   return order;
 }
@@ -128,4 +196,31 @@ export async function deleteOrder(id: number): Promise<boolean> {
 export async function storageInfo(): Promise<{ driver: "netlify-blobs" | "in-memory"; persistent: boolean }> {
   const { persistent } = await store();
   return { driver: persistent ? "netlify-blobs" : "in-memory", persistent };
+}
+
+/** Export semua pesanan ke format CSV */
+export async function exportOrdersToCSV(): Promise<string> {
+  const { orders } = await listOrders({ limit: 10000, page: 1 });
+  
+  const headers = ['ID', 'Tanggal', 'Nama Pelanggan', 'No WhatsApp', 'Layanan', 'Berat (kg)', 'Harga/kg', 'Diskon (%)', 'Total', 'Status', 'Catatan'];
+  const rows = orders.map(order => [
+    order.id,
+    order.createdAt,
+    `"${order.customerName.replace(/"/g, '""')}"`,
+    order.phoneNumber || '',
+    `"${order.serviceType.replace(/"/g, '""')}"`,
+    order.weight,
+    order.pricePerKg,
+    order.discount || 0,
+    order.totalPrice,
+    order.status,
+    order.notes ? `"${order.notes.replace(/"/g, '""')}"` : ''
+  ]);
+  
+  const csvContent = [
+    headers.join(','),
+    ...rows.map(row => row.join(','))
+  ].join('\n');
+  
+  return csvContent;
 }

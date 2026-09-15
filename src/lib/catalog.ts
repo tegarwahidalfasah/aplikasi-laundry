@@ -11,8 +11,15 @@ export const SERVICE_TYPES = [
 
 export type ServiceTypeName = (typeof SERVICE_TYPES)[number]["name"];
 
-export const ORDER_STATUSES = ["Antri", "Diproses", "Selesai", "Diambil"] as const;
+export const ORDER_STATUSES = ["Antri", "Diproses", "Selesai", "Diambil", "Dibatalkan"] as const;
 export type OrderStatus = (typeof ORDER_STATUSES)[number];
+
+export const CANCELLATION_REASONS = [
+  "Pelanggan Membatalkan",
+  "Kendala Operasional",
+  "Pakaian Rusak/Hilang",
+  "Lainnya"
+] as const;
 
 export interface Order {
   id: number;
@@ -25,8 +32,16 @@ export interface Order {
   pricePerKg: number;
   /** weight * pricePerKg, dibulatkan ke rupiah (integer, bukan float). */
   totalPrice: number;
-  status: OrderStatus;
+  status: OrderStatus | "Dibatalkan";
   createdAt: string;
+  notes?: string;
+  discount?: number;
+  /** Total akhir setelah diskon diterapkan */
+  finalPrice?: number;
+  /** Kompensasi jika ada kerusakan/kehilangan (rupiah) */
+  compensation?: number;
+  /** Alasan pembatalan */
+  cancellationReason?: string;
 }
 
 export function priceFor(serviceType: string): number | null {
@@ -44,4 +59,13 @@ export const NEXT_STATUS_LABEL: Record<OrderStatus, string> = {
   Diproses: "Tandai Selesai",
   Selesai: "Sudah Diambil",
   Diambil: "",
+  Dibatalkan: "",
+};
+
+export const STATUS_COLORS: Record<OrderStatus, string> = {
+  Antri: "bg-yellow-100 text-yellow-800",
+  Diproses: "bg-blue-100 text-blue-800",
+  Selesai: "bg-green-100 text-green-800",
+  Diambil: "bg-gray-100 text-gray-800",
+  Dibatalkan: "bg-red-100 text-red-800",
 };
