@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "LAUNDRY.hub - Management System",
-  description: "Sistem Manajemen Laundry Real-time",
+  title: "LAUNDRY.DASH — Sistem Manajemen Laundry",
+  description: "Kelola pesanan laundry: antrean, status, harga otomatis, dan notifikasi WhatsApp.",
 };
 
 export default function RootLayout({
@@ -13,9 +13,7 @@ export default function RootLayout({
 }) {
   return (
     <html lang="id">
-      <body className="antialiased">
-        {children}
-      </body>
+      <body className="antialiased">{children}</body>
     </html>
   );
 }
